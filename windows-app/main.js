@@ -392,6 +392,15 @@ function connectWebSocket() {
         // Server acknowledged heartbeat
         break;
 
+      case 'mac-connected':
+        isPaired = true;
+        sendToRenderer('mac-connected', { message: msg.message });
+        break;
+
+      case 'mac-disconnected':
+        sendToRenderer('mac-disconnected', { message: msg.message });
+        break;
+
       case 'error':
         console.error('[WS] Server error:', msg.message);
         sendToRenderer('error', { message: msg.message });

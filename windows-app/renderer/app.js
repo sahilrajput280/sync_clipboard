@@ -13,6 +13,7 @@
   let textsSent = 0;
   let imagesSent = 0;
   let activityItems = [];
+  let currentView = 'setup';
   const MAX_ACTIVITY = 50;
 
   // ─── DOM Elements ───────────────────────────────────────────────────────────
@@ -29,6 +30,7 @@
     codeText: $('codeText'),
     btnNewCode: $('btnNewCode'),
     btnBackSetup: $('btnBackSetup'),
+    btnSkipToActive: $('btnSkipToActive'),
     activeDot: $('activeDot'),
     statusLabel: $('statusLabel'),
     activityLog: $('activityLog'),
@@ -80,6 +82,9 @@
     // Pairing
     els.btnNewCode.addEventListener('click', handleRequestNewCode);
     els.btnBackSetup.addEventListener('click', () => showView('setup'));
+    if (els.btnSkipToActive) {
+      els.btnSkipToActive.addEventListener('click', () => showView('active'));
+    }
 
     // Active
     els.btnMinToTray.addEventListener('click', () => api.minimizeToTray());
@@ -94,9 +99,22 @@
   // ─── IPC Listeners ────────────────────────────────────────────────────────
   function setupIpcListeners() {
     api.onConnected((data) => {
-      showView('active');
       setStatus('connected', 'Connected');
+      // If we are showing the pairing code to the user, keep it visible!
+      if (currentView !== 'pairing') {
+        showView('active');
+      }
       addActivity('🔗', 'Connected to server');
+    });
+
+    api.onMacConnected((data) => {
+      showView('active');
+      setStatus('connected', 'Mac Connected');
+      addActivity('🍏', 'Mac paired successfully!');
+    });
+
+    api.onMacDisconnected((data) => {
+      addActivity('⚠️', 'Mac disconnected');
     });
 
     api.onDisconnected(() => {
@@ -207,6 +225,7 @@
 
   // ─── UI Helpers ────────────────────────────────────────────────────────────
   function showView(view) {
+    currentView = view;
     els.viewSetup.style.display = view === 'setup' ? '' : 'none';
     els.viewPairing.style.display = view === 'pairing' ? '' : 'none';
     els.viewActive.style.display = view === 'active' ? '' : 'none';

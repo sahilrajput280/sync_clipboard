@@ -207,6 +207,14 @@ wss.on('connection', (ws, req) => {
             message: 'Mac registered successfully.'
           });
 
+          // Notify Windows that Mac connected
+          if (session.windowsWs) {
+            sendJson(session.windowsWs, {
+              type: 'mac-connected',
+              message: 'Mac paired and connected successfully!'
+            });
+          }
+
           console.log(`[WS] Mac connected → Session: ${sessionId.slice(0, 8)}...`);
         }
         break;
@@ -280,6 +288,11 @@ wss.on('connection', (ws, req) => {
     } else if (role === 'mac' && session.macWs === ws) {
       session.macWs = null;
       console.log(`[WS] Mac disconnected → Session: ${sessionId.slice(0, 8)}...`);
+
+      // Notify Windows
+      if (session.windowsWs) {
+        sendJson(session.windowsWs, { type: 'mac-disconnected', message: 'Mac disconnected' });
+      }
     }
   });
 

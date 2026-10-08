@@ -34,4 +34,6 @@ contextBridge.exposeInMainWorld('clipboardSync', {
   onError: (callback) => ipcRenderer.on('error', (_, data) => callback(data)),
   onSessionLoaded: (callback) => ipcRenderer.on('session-loaded', (_, data) => callback(data)),
   onReplaced: (callback) => ipcRenderer.on('replaced', (_, data) => callback(data)),
+  onMacConnected: (callback) => ipcRenderer.on('mac-connected', (_, data) => callback(data)),
+  onMacDisconnected: (callback) => ipcRenderer.on('mac-disconnected', (_, data) => callback(data)),
 });
