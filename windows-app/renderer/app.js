@@ -183,19 +183,13 @@
 
     const result = await api.requestPairing();
 
-    if (result.success) {
-      if (result.reconnected) {
-        showView('active');
-        setStatus('connected', 'Connected');
-        addActivity('🔗', 'Reconnected to existing session');
-      } else {
-        els.codeText.textContent = result.code;
-        showView('pairing');
-        // Auto connect WS so it registers and is ready when Mac pairs
-        await api.connectWs();
-      }
+    if (result.success && result.code) {
+      els.codeText.textContent = result.code;
+      showView('pairing');
+      // Auto connect WS so it registers and is ready when Mac pairs
+      await api.connectWs();
     } else {
-      showSetupError(result.error);
+      showSetupError(result.error || 'Failed to generate pairing code');
     }
 
     els.btnConnect.disabled = false;

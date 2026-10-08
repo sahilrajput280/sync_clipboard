@@ -59,16 +59,20 @@ function sendJson(ws, data) {
 app.post('/api/request-pairing', (req, res) => {
   cleanExpiredCodes();
 
-  const { sessionId } = req.body;
+  const { sessionId, forceNew } = req.body;
 
-  // If reconnecting with existing session
-  if (sessionId && sessions.has(sessionId)) {
-    return res.json({
-      success: true,
-      sessionId,
-      reconnected: true,
-      message: 'Reconnected to existing session'
-    });
+  // If reconnecting with existing session and NOT requesting a new code
+  if (!forceNew && sessionId && sessions.has(sessionId)) {
+    const session = sessions.get(sessionId);
+    // Only reconnect if this session already had a Mac connected
+    if (session.macWs) {
+      return res.json({
+        success: true,
+        sessionId,
+        reconnected: true,
+        message: 'Reconnected to existing session'
+      });
+    }
   }
 
   const code = generatePairingCode();

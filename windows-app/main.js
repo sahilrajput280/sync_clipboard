@@ -242,7 +242,7 @@ ipcMain.handle('request-pairing', async () => {
 
     return new Promise((resolve) => {
       const url = new URL('/api/request-pairing', serverUrl);
-      const body = JSON.stringify({ sessionId: store.get('sessionId') });
+      const body = JSON.stringify({ forceNew: true });
 
       const req = http.request(url, {
         method: 'POST',
@@ -256,17 +256,15 @@ ipcMain.handle('request-pairing', async () => {
         res.on('end', () => {
           try {
             const json = JSON.parse(data);
-            if (json.success) {
+            if (json.success && json.code) {
               sessionId = json.sessionId;
-              store.set('sessionId', sessionId);
-
-              if (json.reconnected) {
-                isPaired = true;
-                connectWebSocket();
-                resolve({ success: true, reconnected: true });
-              } else {
-                resolve({ success: true, code: json.code, sessionId });
+              isPaired = false;
+              stopClipboardMonitor();
+              if (ws) {
+                try { ws.close(); } catch(e) {}
+                ws = null;
               }
+              resolve({ success: true, code: json.code, sessionId });
             } else {
               resolve({ success: false, error: json.error || 'Failed to get pairing code' });
             }
@@ -382,10 +380,12 @@ function connectWebSocket() {
       case 'registered':
         isConnected = true;
         updateTrayMenu();
-        startClipboardMonitor();
         startHeartbeat();
-        sendToRenderer('connected', { message: msg.message });
-        console.log('[WS] Registered as Windows');
+        if (isPaired) {
+          startClipboardMonitor();
+        }
+        sendToRenderer('connected', { isPaired, message: msg.message });
+        console.log('[WS] Registered as Windows (paired=' + isPaired + ')');
         break;
 
       case 'heartbeat-ack':
@@ -394,7 +394,11 @@ function connectWebSocket() {
 
       case 'mac-connected':
         isPaired = true;
+        store.set('sessionId', sessionId);
+        startClipboardMonitor();
+        updateTrayMenu();
         sendToRenderer('mac-connected', { message: msg.message });
+        console.log('[WS] Mac paired and connected!');
         break;
 
       case 'mac-disconnected':
