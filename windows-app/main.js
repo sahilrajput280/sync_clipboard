@@ -501,29 +501,42 @@ function checkClipboard() {
     const img = clipboard.readImage();
     if (img && !img.isEmpty()) {
       const hash = hashImageData(img);
-      if (hash !== lastClipboardImageHash) {
+      if (hash && hash !== lastClipboardImageHash) {
         lastClipboardImageHash = hash;
         lastClipboardText = ''; // Reset text tracking
 
+        const size = img.getSize();
+        let buffer;
+        let mimeType = 'image/png';
         const pngBuffer = img.toPNG();
-        if (pngBuffer.length <= MAX_IMAGE_SIZE_BYTES) {
-          const base64 = pngBuffer.toString('base64');
+
+        // If screenshot/image is over 1MB or larger than standard HD, use high-quality JPEG (85)
+        // This drops 5-15MB raw screenshots down to ~200-400KB, avoiding proxy frame drops
+        if (pngBuffer.length > 1024 * 1024 || size.width > 1920) {
+          buffer = img.toJPEG(85);
+          mimeType = 'image/jpeg';
+        } else {
+          buffer = pngBuffer;
+        }
+
+        if (buffer.length <= MAX_IMAGE_SIZE_BYTES) {
+          const base64 = buffer.toString('base64');
 
           ws.send(JSON.stringify({
             type: 'clipboard',
             contentType: 'image',
             content: base64,
-            mimeType: 'image/png'
+            mimeType: mimeType
           }));
 
           sendToRenderer('clipboard-sent', {
             contentType: 'image',
-            size: pngBuffer.length
+            size: buffer.length
           });
 
-          console.log(`[Clipboard] Image sent (${(pngBuffer.length / 1024).toFixed(1)}KB)`);
+          console.log(`[Clipboard] Image sent: ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB) via ${mimeType}`);
         } else {
-          console.log(`[Clipboard] Image too large (${(pngBuffer.length / (1024 * 1024)).toFixed(1)}MB), skipped`);
+          console.log(`[Clipboard] Image too large (${(buffer.length / (1024 * 1024)).toFixed(1)}MB), skipped`);
           sendToRenderer('clipboard-error', { message: 'Image too large to send (>10MB)' });
         }
         return;
@@ -534,11 +547,7 @@ function checkClipboard() {
     const text = clipboard.readText();
     if (text && text !== lastClipboardText && text.trim().length > 0) {
       lastClipboardText = text;
-      // Reset image hash when text is copied
-      const currentImg = clipboard.readImage();
-      if (currentImg && !currentImg.isEmpty()) {
-        lastClipboardImageHash = hashImageData(currentImg);
-      }
+      lastClipboardImageHash = ''; // Reset image hash so next image is captured reliably
 
       ws.send(JSON.stringify({
         type: 'clipboard',
@@ -559,15 +568,15 @@ function checkClipboard() {
 }
 
 function hashImageData(img) {
-  // Simple hash based on image size and first few bytes
-  const buf = img.toPNG();
-  const size = buf.length;
-  let hash = size.toString();
-  // Sample a few bytes for faster comparison
-  for (let i = 0; i < Math.min(100, buf.length); i += 10) {
-    hash += buf[i].toString(16);
+  try {
+    const size = img.getSize();
+    if (size.width === 0 || size.height === 0) return '';
+    const bmp = img.toBitmap();
+    const sample = bmp.slice(0, Math.min(64, bmp.length));
+    return `${size.width}x${size.height}_${bmp.length}_${sample.toString('hex')}`;
+  } catch (e) {
+    return '';
   }
-  return hash;
 }
 
 // ─── IPC Helper ─────────────────────────────────────────────────────────────

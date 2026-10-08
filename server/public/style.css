@@ -769,6 +769,7 @@ body {
   cursor: default;
   transition: all var(--transition-fast);
   animation: fadeInUp 200ms var(--ease-out) both;
+  overflow: hidden;
 }
 
 .history-item:hover {
@@ -791,9 +792,12 @@ body {
 .history-content {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .history-text {
+  display: block;
+  width: 100%;
   font-size: 0.82rem;
   color: var(--text-secondary);
   white-space: nowrap;
@@ -817,6 +821,7 @@ body {
 
 .history-actions {
   flex-shrink: 0;
+  margin-left: 8px;
 }
 
 .history-copy-btn {
