@@ -59,8 +59,33 @@
     toastMsg: $('toastMsg'),
   };
 
+  // ─── Theme Management ───────────────────────────────────────────────────────
+  const THEME_KEY = 'clipboardsync_theme';
+  function initTheme() {
+    const saved = localStorage.getItem(THEME_KEY);
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme = saved || (prefersDark ? 'dark' : 'light');
+    setTheme(theme);
+
+    const btn = document.getElementById('btnThemeToggle');
+    if (btn) {
+      btn.addEventListener('click', () => {
+        const current = document.documentElement.getAttribute('data-theme') || 'dark';
+        const next = current === 'dark' ? 'light' : 'dark';
+        setTheme(next);
+      });
+    }
+  }
+
+  function setTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem(THEME_KEY, theme);
+  }
+
   // ─── Initialization ────────────────────────────────────────────────────────
   function init() {
+    initTheme();
+
     // Check for saved session
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {

@@ -3,31 +3,69 @@
    Compact, premium dark UI for the Electron desktop application
    ═══════════════════════════════════════════════════════════════════════════════ */
 
-:root {
-  --bg-base: #0a0b0f;
-  --bg-surface: #111219;
-  --bg-elevated: #191a24;
-  --bg-card: rgba(22, 23, 34, 0.8);
-  --bg-hover: rgba(30, 31, 45, 0.9);
+:root, [data-theme="dark"] {
+  --bg-base: #000000;
+  --bg-surface: #0a0a0c;
+  --bg-elevated: #18181b;
+  --bg-card: rgba(18, 18, 20, 0.9);
+  --bg-hover: rgba(28, 28, 32, 0.95);
 
-  --border-subtle: rgba(255, 255, 255, 0.06);
-  --border-default: rgba(255, 255, 255, 0.1);
-  --border-focus: rgba(99, 102, 241, 0.5);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-default: rgba(255, 255, 255, 0.16);
+  --border-focus: #ffffff;
 
-  --text-primary: #f0f0f5;
-  --text-secondary: #8b8d9e;
-  --text-muted: #5a5c6e;
+  --text-primary: #ffffff;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+  --text-inverse: #000000;
 
-  --accent: #6366f1;
-  --accent-hover: #7577f5;
-  --accent-glow: rgba(99, 102, 241, 0.25);
-  --accent-gradient: linear-gradient(135deg, #6366f1, #8b5cf6);
+  --accent: #ffffff;
+  --accent-hover: #e4e4e7;
+  --accent-glow: rgba(255, 255, 255, 0.2);
+  --accent-gradient: #ffffff;
 
-  --success: #22c55e;
-  --success-glow: rgba(34, 197, 94, 0.25);
-  --warning: #f59e0b;
-  --error: #ef4444;
-  --error-light: rgba(239, 68, 68, 0.12);
+  --success: #ffffff;
+  --success-glow: rgba(255, 255, 255, 0.25);
+  --warning: #a1a1aa;
+  --error: #ffffff;
+  --error-light: rgba(255, 255, 255, 0.1);
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-full: 9999px;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-fast: 150ms var(--ease-out);
+  --transition-normal: 250ms var(--ease-out);
+}
+
+[data-theme="light"] {
+  --bg-base: #ffffff;
+  --bg-surface: #fafafa;
+  --bg-elevated: #f4f4f5;
+  --bg-card: rgba(255, 255, 255, 0.95);
+  --bg-hover: rgba(244, 244, 245, 0.95);
+
+  --border-subtle: rgba(0, 0, 0, 0.08);
+  --border-default: rgba(0, 0, 0, 0.15);
+  --border-focus: #000000;
+
+  --text-primary: #000000;
+  --text-secondary: #52525b;
+  --text-muted: #71717a;
+  --text-inverse: #ffffff;
+
+  --accent: #000000;
+  --accent-hover: #27272a;
+  --accent-glow: rgba(0, 0, 0, 0.12);
+  --accent-gradient: #000000;
+
+  --success: #000000;
+  --success-glow: rgba(0, 0, 0, 0.2);
+  --warning: #52525b;
+  --error: #000000;
+  --error-light: rgba(0, 0, 0, 0.08);
 
   --radius-sm: 8px;
   --radius-md: 12px;
@@ -147,20 +185,17 @@ html, body {
   width: 56px;
   height: 56px;
   border-radius: var(--radius-md);
-  background: var(--accent-gradient);
-  color: white;
+  background: var(--text-primary);
+  color: var(--text-inverse);
   margin-bottom: 14px;
-  box-shadow: 0 0 30px var(--accent-glow);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 }
 
 .setup-header h1 {
   font-size: 1.3rem;
   font-weight: 800;
   letter-spacing: -0.03em;
-  background: linear-gradient(135deg, #818cf8, #c084fc);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--text-primary);
 }
 
 .tagline {
@@ -169,6 +204,11 @@ html, body {
   margin-top: 4px;
   font-weight: 500;
 }
+
+[data-theme="dark"] .theme-icon-sun { display: block; }
+[data-theme="dark"] .theme-icon-moon { display: none; }
+[data-theme="light"] .theme-icon-sun { display: none; }
+[data-theme="light"] .theme-icon-moon { display: block; }
 
 .setup-form {
   display: flex;
@@ -238,14 +278,16 @@ html, body {
 }
 
 .btn-primary {
-  background: var(--accent-gradient);
-  color: white;
-  box-shadow: 0 2px 12px var(--accent-glow);
+  background: var(--text-primary);
+  color: var(--text-inverse);
+  border: 1px solid var(--text-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
 .btn-primary:hover {
+  background: var(--accent-hover);
+  color: var(--text-inverse);
   transform: translateY(-1px);
-  box-shadow: 0 4px 20px var(--accent-glow);
 }
 
 .btn-primary:active { transform: translateY(0); }
@@ -313,8 +355,9 @@ html, body {
   width: 52px;
   height: 52px;
   border-radius: var(--radius-md);
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.1));
-  color: var(--accent);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
   margin-bottom: 12px;
 }
 
@@ -323,6 +366,7 @@ html, body {
   font-weight: 700;
   letter-spacing: -0.02em;
   margin-bottom: 6px;
+  color: var(--text-primary);
 }
 
 .pairing-header p {
@@ -336,7 +380,7 @@ html, body {
   padding: 20px;
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
-  border: 2px dashed var(--accent);
+  border: 1.5px dashed var(--border-default);
   margin-bottom: 10px;
 }
 
@@ -345,10 +389,7 @@ html, body {
   font-size: 2rem;
   font-weight: 700;
   letter-spacing: 0.15em;
-  background: linear-gradient(135deg, #818cf8, #c084fc);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--text-primary);
 }
 
 .code-hint {
@@ -365,19 +406,19 @@ html, body {
   gap: 10px;
   padding: 14px;
   border-radius: var(--radius-sm);
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.15);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
   margin-bottom: 16px;
   font-size: 0.8rem;
-  color: var(--warning);
+  color: var(--text-secondary);
   font-weight: 500;
 }
 
 .waiting-spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(245, 158, 11, 0.3);
-  border-top-color: var(--warning);
+  border: 2px solid var(--border-default);
+  border-top-color: var(--text-primary);
   border-radius: 50%;
   animation: spin 800ms linear infinite;
 }
@@ -420,17 +461,19 @@ html, body {
 }
 
 .status-dot.connected {
-  background: var(--success);
-  box-shadow: 0 0 10px var(--success-glow);
+  background: var(--text-primary);
+  box-shadow: 0 0 10px var(--accent-glow);
   animation: pulse 2s ease-in-out infinite;
 }
 
 .status-dot.disconnected {
-  background: var(--error);
+  background: transparent;
+  border: 1.5px solid var(--text-muted);
 }
 
 .status-dot.reconnecting {
-  background: var(--warning);
+  background: transparent;
+  border: 1.5px dashed var(--text-primary);
   animation: pulse 1s ease-in-out infinite;
 }
 
@@ -637,11 +680,11 @@ html, body {
 }
 
 .toggle-input:checked + .toggle-switch {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--text-primary);
+  border-color: var(--text-primary);
 }
 
 .toggle-input:checked + .toggle-switch::after {
   transform: translateX(18px);
-  background: white;
+  background: var(--text-inverse);
 }
