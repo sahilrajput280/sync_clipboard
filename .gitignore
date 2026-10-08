@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+server/node_modules/
+windows-app/node_modules/
+
+# Production build artifacts
+windows-app/dist/
+dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment & OS files
+.env
+.env.local
+.DS_Store
+Thumbs.db

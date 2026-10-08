@@ -1,0 +1,16 @@
+{
+  "name": "clipboardsync-server",
+  "version": "1.0.0",
+  "description": "ClipboardSync relay server — bridges Windows clipboard to Mac in real-time",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "uuid": "^9.0.0",
+    "cors": "^2.8.5"
+  }
+}

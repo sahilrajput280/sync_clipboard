@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClipboardSync</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- ─── Custom Title Bar ─────────────────────────────────────────── -->
+    <div class="titlebar" id="titlebar">
+      <div class="titlebar-drag">
+        <span class="titlebar-title">ClipboardSync</span>
+      </div>
+      <div class="titlebar-controls">
+        <button class="titlebar-btn titlebar-btn--minimize" id="btnMinimize" title="Minimize">
+          <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+        </button>
+        <button class="titlebar-btn titlebar-btn--close" id="btnClose" title="Close to tray">
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.2"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- ─── Main Content ─────────────────────────────────────────────── -->
+    <div class="content">
+      <!-- ── Setup View ─────────────────────────────────────────────── -->
+      <section class="view" id="viewSetup">
+        <div class="setup-header">
+          <div class="app-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+              <rect x="8" y="2" width="8" height="4" rx="1" ry="1"/>
+            </svg>
+          </div>
+          <h1>ClipboardSync</h1>
+          <p class="tagline">Windows → Mac clipboard bridge</p>
+        </div>
+
+        <div class="setup-form">
+          <div class="input-group">
+            <label for="serverUrl">Server Address</label>
+            <input 
+              type="text" 
+              id="serverUrl" 
+              placeholder="e.g. 192.168.1.100:3000 or your-server.com"
+              spellcheck="false"
+              autocomplete="off"
+            >
+            <span class="input-hint">The address where ClipboardSync server is running</span>
+          </div>
+          <button class="btn btn-primary" id="btnConnect">
+            <span>Generate Pairing Code</span>
+          </button>
+          <div class="setup-error" id="setupError" style="display:none">
+            <span id="setupErrorText"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Pairing View ───────────────────────────────────────────── -->
+      <section class="view" id="viewPairing" style="display:none">
+        <div class="pairing-header">
+          <div class="pairing-icon-wrapper">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+            </svg>
+          </div>
+          <h2>Pair with Mac</h2>
+          <p>Enter this code on the ClipboardSync web app on your Mac</p>
+        </div>
+
+        <div class="code-display" id="codeDisplay">
+          <span class="code-text" id="codeText">----‑----</span>
+        </div>
+        <p class="code-hint">This code expires in 10 minutes</p>
+
+        <div class="pairing-waiting">
+          <div class="waiting-spinner"></div>
+          <span>Waiting for Mac to connect…</span>
+        </div>
+
+        <button class="btn btn-ghost btn-sm" id="btnNewCode">Generate new code</button>
+        <button class="btn btn-ghost btn-sm" id="btnBackSetup">← Back</button>
+      </section>
+
+      <!-- ── Active View ────────────────────────────────────────────── -->
+      <section class="view" id="viewActive" style="display:none">
+        <div class="status-card" id="statusCard">
+          <div class="status-indicator" id="statusIndicator">
+            <span class="status-dot" id="activeDot"></span>
+            <span class="status-label" id="statusLabel">Connecting…</span>
+          </div>
+          <div class="status-direction">
+            <span class="direction-label">Windows</span>
+            <svg class="direction-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"/>
+              <polyline points="12 5 19 12 12 19"/>
+            </svg>
+            <span class="direction-label">Mac</span>
+          </div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="activity-section">
+          <h3 class="activity-title">Activity</h3>
+          <div class="activity-log" id="activityLog">
+            <div class="activity-empty">
+              <p>No clipboard activity yet</p>
+              <p class="activity-hint">Copy something to see it appear here</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats-row">
+          <div class="stat">
+            <span class="stat-value" id="statItems">0</span>
+            <span class="stat-label">Items Sent</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="statTexts">0</span>
+            <span class="stat-label">Text</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="statImages">0</span>
+            <span class="stat-label">Images</span>
+          </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="active-actions">
+          <button class="btn btn-secondary btn-sm" id="btnMinToTray">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2z"/>
+              <line x1="3" y1="19" x2="21" y2="19"/>
+            </svg>
+            Minimize to Tray
+          </button>
+          <button class="btn btn-ghost btn-sm btn-danger" id="btnDisconnectActive">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+              <line x1="12" y1="2" x2="12" y2="12"/>
+            </svg>
+            Disconnect
+          </button>
+        </div>
+
+        <!-- Settings -->
+        <div class="settings-section">
+          <label class="toggle-row">
+            <span>Start with Windows</span>
+            <input type="checkbox" id="toggleAutoLaunch" class="toggle-input">
+            <span class="toggle-switch"></span>
+          </label>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
