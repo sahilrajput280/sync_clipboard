@@ -221,7 +221,11 @@ ipcMain.handle('set-server-url', async (event, url) => {
   // Normalize URL
   let normalized = url.trim().replace(/\/+$/, '');
   if (!normalized.startsWith('http://') && !normalized.startsWith('https://')) {
-    normalized = 'http://' + normalized;
+    if (normalized.startsWith('localhost') || normalized.startsWith('127.0.0.1') || /^192\.168\./.test(normalized) || /^10\./.test(normalized)) {
+      normalized = 'http://' + normalized;
+    } else {
+      normalized = 'https://' + normalized;
+    }
   }
   serverUrl = normalized;
   store.set('serverUrl', normalized);
