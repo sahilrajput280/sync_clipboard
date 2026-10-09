@@ -506,18 +506,19 @@ function checkClipboard() {
         lastClipboardText = ''; // Reset text tracking
 
         const size = img.getSize();
-        let buffer;
-        let mimeType = 'image/png';
-        const pngBuffer = img.toPNG();
-
-        // If screenshot/image is over 1MB or larger than standard HD, use high-quality JPEG (85)
-        // This drops 5-15MB raw screenshots down to ~200-400KB, avoiding proxy frame drops
-        if (pngBuffer.length > 1024 * 1024 || size.width > 1920) {
-          buffer = img.toJPEG(85);
-          mimeType = 'image/jpeg';
-        } else {
-          buffer = pngBuffer;
+        let targetImg = img;
+        if (size.width > 1920) {
+          const ratio = 1920 / size.width;
+          targetImg = img.resize({
+            width: 1920,
+            height: Math.round(size.height * ratio),
+            quality: 'better'
+          });
         }
+
+        // JPEG 80 gives crystal clear screenshot quality while maintaining tiny footprint
+        const buffer = targetImg.toJPEG(80);
+        const mimeType = 'image/jpeg';
 
         if (buffer.length <= MAX_IMAGE_SIZE_BYTES) {
           uploadClipboardImage(buffer, mimeType, size);
@@ -557,57 +558,94 @@ function checkClipboard() {
   }
 }
 
-function uploadClipboardImage(buffer, mimeType, size) {
+async function uploadClipboardImage(buffer, mimeType, size) {
   if (!serverUrl || !sessionId) return;
 
-  try {
-    const isHttps = serverUrl.startsWith('https');
-    const httpLib = isHttps ? require('https') : require('http');
-    const url = new URL('/api/clipboard-image', serverUrl);
+  const crypto = require('crypto');
+  const imageId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now();
+  const CHUNK_SIZE = 6144; // 6KB chunks ensure 100% transmission through any ISP/proxy/TLS layer
+  const totalChunks = Math.ceil(buffer.length / CHUNK_SIZE);
 
-    const req = httpLib.request(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': mimeType,
-        'Content-Length': buffer.length,
-        'x-session-id': sessionId
-      }
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          if (json.success) {
-            sendToRenderer('clipboard-sent', {
-              contentType: 'image',
-              size: buffer.length
-            });
-            console.log(`[Clipboard] Image uploaded: ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB) via ${mimeType}`);
-          } else {
-            console.error('[Clipboard] Image upload failed:', json.error);
-            sendToRenderer('clipboard-error', { message: json.error || 'Image upload failed' });
+  console.log(`[Clipboard] Uploading ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB) in ${totalChunks} chunks...`);
+
+  const isHttps = serverUrl.startsWith('https');
+  const httpLib = isHttps ? require('https') : require('http');
+
+  function sendOneChunk(index, chunkBuffer, maxRetries = 4) {
+    return new Promise((resolve, reject) => {
+      let attempt = 0;
+
+      function trySend() {
+        attempt++;
+        const url = new URL('/api/clipboard-image-chunk', serverUrl);
+        const req = httpLib.request(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': chunkBuffer.length,
+            'x-session-id': sessionId,
+            'x-image-id': imageId,
+            'x-chunk-index': String(index),
+            'x-total-chunks': String(totalChunks),
+            'x-mime-type': mimeType
           }
-        } catch (e) {
-          console.error('[Clipboard] Invalid upload response');
-        }
-      });
-    });
+        }, (res) => {
+          let data = '';
+          res.on('data', c => data += c);
+          res.on('end', () => {
+            if (res.statusCode === 200) {
+              resolve();
+            } else {
+              if (attempt < maxRetries) {
+                setTimeout(trySend, 100 * attempt);
+              } else {
+                reject(new Error(`Server returned HTTP ${res.statusCode}`));
+              }
+            }
+          });
+        });
 
-    req.on('error', (err) => {
-      console.error('[Clipboard] Image upload error:', err.message);
-      sendToRenderer('clipboard-error', { message: `Image send failed: ${err.message}` });
-    });
+        req.on('error', (err) => {
+          if (attempt < maxRetries) {
+            setTimeout(trySend, 100 * attempt);
+          } else {
+            reject(err);
+          }
+        });
 
-    req.setTimeout(30000, () => {
-      req.destroy();
-      console.error('[Clipboard] Image upload timeout');
-    });
+        req.setTimeout(15000, () => {
+          req.destroy();
+          if (attempt < maxRetries) {
+            setTimeout(trySend, 100 * attempt);
+          } else {
+            reject(new Error('Chunk upload timed out'));
+          }
+        });
 
-    req.write(buffer);
-    req.end();
+        req.write(chunkBuffer);
+        req.end();
+      }
+
+      trySend();
+    });
+  }
+
+  try {
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, buffer.length);
+      const chunk = buffer.subarray(start, end);
+      await sendOneChunk(i, chunk);
+    }
+
+    sendToRenderer('clipboard-sent', {
+      contentType: 'image',
+      size: buffer.length
+    });
+    console.log(`[Clipboard] Image uploaded successfully: ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB)`);
   } catch (err) {
-    console.error('[Clipboard] uploadClipboardImage error:', err.message);
+    console.error('[Clipboard] Image upload failed:', err.message);
+    sendToRenderer('clipboard-error', { message: `Image send failed: ${err.message}` });
   }
 }
 

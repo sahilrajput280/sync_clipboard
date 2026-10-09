@@ -10,8 +10,9 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 app.use(cors());
-// Raw binary body parser for clipboard images (must be before express.json)
+// Raw binary body parser for clipboard images and chunks (must be before express.json)
 app.use('/api/clipboard-image', express.raw({ type: '*/*', limit: '50mb' }));
+app.use('/api/clipboard-image-chunk', express.raw({ type: '*/*', limit: '50mb' }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -24,6 +25,8 @@ const sessions = new Map();
 const wsToSession = new WeakMap();
 // imageStore: { imageId: { buffer, mimeType, timestamp } }
 const imageStore = new Map();
+// pendingImageChunks: { imageId: { chunks, totalChunks, received, mimeType, sessionId, createdAt } }
+const pendingImageChunks = new Map();
 const MAX_STORED_IMAGES = 40;
 
 const PAIRING_CODE_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
@@ -214,6 +217,84 @@ app.post('/api/clipboard-image', (req, res) => {
   console.log(`[HTTP Image] ${(buffer.length / 1024).toFixed(1)}KB (${mimeType}) → Session: ${sessionId.slice(0, 8)}... (Mac WS open: ${!!(session.macWs && session.macWs.readyState === WebSocket.OPEN)})`);
 
   res.json({ success: true, id: imageId });
+});
+
+// Windows uploads an image in small resilient chunks (bypasses any proxy/WAF/ISP packet limits)
+app.post('/api/clipboard-image-chunk', (req, res) => {
+  const sessionId = req.headers['x-session-id'];
+  const imageId = req.headers['x-image-id'];
+  const chunkIndex = parseInt(req.headers['x-chunk-index'], 10);
+  const totalChunks = parseInt(req.headers['x-total-chunks'], 10);
+  const rawMime = req.headers['x-mime-type'] || 'image/jpeg';
+  const mimeType = rawMime.split(';')[0].trim();
+
+  if (!sessionId || !imageId || isNaN(chunkIndex) || isNaN(totalChunks)) {
+    return res.status(400).json({ success: false, error: 'Missing chunk headers' });
+  }
+
+  const chunkBuffer = req.body;
+  if (!chunkBuffer || !Buffer.isBuffer(chunkBuffer)) {
+    return res.status(400).json({ success: false, error: 'Invalid chunk buffer' });
+  }
+
+  let pending = pendingImageChunks.get(imageId);
+  if (!pending) {
+    pending = {
+      chunks: new Array(totalChunks),
+      totalChunks,
+      received: 0,
+      mimeType,
+      sessionId,
+      createdAt: Date.now()
+    };
+    pendingImageChunks.set(imageId, pending);
+  }
+
+  if (!pending.chunks[chunkIndex]) {
+    pending.chunks[chunkIndex] = chunkBuffer;
+    pending.received++;
+  }
+
+  // All chunks received -> assemble and deliver!
+  if (pending.received >= pending.totalChunks) {
+    pendingImageChunks.delete(imageId);
+    const fullBuffer = Buffer.concat(pending.chunks);
+
+    const session = getOrCreateSession(sessionId);
+    cleanOldImages();
+    imageStore.set(imageId, {
+      buffer: fullBuffer,
+      mimeType: pending.mimeType,
+      timestamp: Date.now()
+    });
+
+    const item = {
+      id: imageId,
+      contentType: 'image',
+      content: null,
+      mimeType: pending.mimeType,
+      timestamp: Date.now(),
+      size: fullBuffer.length
+    };
+
+    session.clipboardHistory.unshift(item);
+    if (session.clipboardHistory.length > MAX_HISTORY) {
+      session.clipboardHistory = session.clipboardHistory.slice(0, MAX_HISTORY);
+    }
+    session.lastActivity = Date.now();
+
+    if (session.macWs && session.macWs.readyState === WebSocket.OPEN) {
+      sendJson(session.macWs, {
+        type: 'clipboard',
+        item
+      });
+    }
+
+    console.log(`[Chunked Image Complete] ${(fullBuffer.length / 1024).toFixed(1)}KB (${pending.mimeType}, ${totalChunks} chunks) → Session: ${sessionId.slice(0, 8)}... (Mac WS open: ${!!(session.macWs && session.macWs.readyState === WebSocket.OPEN)})`);
+    return res.json({ success: true, complete: true, id: imageId });
+  }
+
+  res.json({ success: true, complete: false, received: pending.received, total: totalChunks });
 });
 
 // Mac fetches image binary
