@@ -507,17 +507,17 @@ function checkClipboard() {
 
         const size = img.getSize();
         let targetImg = img;
-        if (size.width > 1920) {
-          const ratio = 1920 / size.width;
+        if (size.width > 1600) {
+          const ratio = 1600 / size.width;
           targetImg = img.resize({
-            width: 1920,
+            width: 1600,
             height: Math.round(size.height * ratio),
             quality: 'better'
           });
         }
 
-        // JPEG 80 gives crystal clear screenshot quality while maintaining tiny footprint
-        const buffer = targetImg.toJPEG(80);
+        // JPEG 75 gives crisp screenshot readability with a tiny, super-fast payload
+        const buffer = targetImg.toJPEG(75);
         const mimeType = 'image/jpeg';
 
         if (buffer.length <= MAX_IMAGE_SIZE_BYTES) {
@@ -563,7 +563,7 @@ async function uploadClipboardImage(buffer, mimeType, size) {
 
   const crypto = require('crypto');
   const imageId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now();
-  const CHUNK_SIZE = 6144; // 6KB chunks ensure 100% transmission through any ISP/proxy/TLS layer
+  const CHUNK_SIZE = 4096; // 4KB chunks ensure 100% transmission across any ISP, CGNAT, or Cloudflare edge
   const totalChunks = Math.ceil(buffer.length / CHUNK_SIZE);
 
   console.log(`[Clipboard] Uploading ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB) in ${totalChunks} chunks...`);
@@ -571,7 +571,7 @@ async function uploadClipboardImage(buffer, mimeType, size) {
   const isHttps = serverUrl.startsWith('https');
   const httpLib = isHttps ? require('https') : require('http');
 
-  function sendOneChunk(index, chunkBuffer, maxRetries = 4) {
+  function sendOneChunk(index, chunkBuffer, maxRetries = 6) {
     return new Promise((resolve, reject) => {
       let attempt = 0;
 
@@ -580,6 +580,7 @@ async function uploadClipboardImage(buffer, mimeType, size) {
         const url = new URL('/api/clipboard-image-chunk', serverUrl);
         const req = httpLib.request(url, {
           method: 'POST',
+          agent: false, // Clean new socket every time to bypass TLS poisoning/fragmentation
           headers: {
             'Content-Type': 'application/octet-stream',
             'Content-Length': chunkBuffer.length,
@@ -597,7 +598,7 @@ async function uploadClipboardImage(buffer, mimeType, size) {
               resolve();
             } else {
               if (attempt < maxRetries) {
-                setTimeout(trySend, 100 * attempt);
+                setTimeout(trySend, 150 * attempt);
               } else {
                 reject(new Error(`Server returned HTTP ${res.statusCode}`));
               }
@@ -607,7 +608,7 @@ async function uploadClipboardImage(buffer, mimeType, size) {
 
         req.on('error', (err) => {
           if (attempt < maxRetries) {
-            setTimeout(trySend, 100 * attempt);
+            setTimeout(trySend, 150 * attempt);
           } else {
             reject(err);
           }
@@ -616,7 +617,7 @@ async function uploadClipboardImage(buffer, mimeType, size) {
         req.setTimeout(15000, () => {
           req.destroy();
           if (attempt < maxRetries) {
-            setTimeout(trySend, 100 * attempt);
+            setTimeout(trySend, 150 * attempt);
           } else {
             reject(new Error('Chunk upload timed out'));
           }
