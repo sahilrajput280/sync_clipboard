@@ -520,21 +520,7 @@ function checkClipboard() {
         }
 
         if (buffer.length <= MAX_IMAGE_SIZE_BYTES) {
-          const base64 = buffer.toString('base64');
-
-          ws.send(JSON.stringify({
-            type: 'clipboard',
-            contentType: 'image',
-            content: base64,
-            mimeType: mimeType
-          }));
-
-          sendToRenderer('clipboard-sent', {
-            contentType: 'image',
-            size: buffer.length
-          });
-
-          console.log(`[Clipboard] Image sent: ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB) via ${mimeType}`);
+          uploadClipboardImage(buffer, mimeType, size);
         } else {
           console.log(`[Clipboard] Image too large (${(buffer.length / (1024 * 1024)).toFixed(1)}MB), skipped`);
           sendToRenderer('clipboard-error', { message: 'Image too large to send (>10MB)' });
@@ -549,21 +535,119 @@ function checkClipboard() {
       lastClipboardText = text;
       lastClipboardImageHash = ''; // Reset image hash so next image is captured reliably
 
-      ws.send(JSON.stringify({
-        type: 'clipboard',
-        contentType: 'text',
-        content: text
-      }));
+      if (text.length > 15000) {
+        uploadClipboardText(text);
+      } else {
+        ws.send(JSON.stringify({
+          type: 'clipboard',
+          contentType: 'text',
+          content: text
+        }));
 
-      sendToRenderer('clipboard-sent', {
-        contentType: 'text',
-        preview: text.length > 60 ? text.slice(0, 60) + '…' : text
-      });
+        sendToRenderer('clipboard-sent', {
+          contentType: 'text',
+          preview: text.length > 60 ? text.slice(0, 60) + '…' : text
+        });
 
-      console.log(`[Clipboard] Text sent (${text.length} chars)`);
+        console.log(`[Clipboard] Text sent (${text.length} chars)`);
+      }
     }
   } catch (err) {
     console.error('[Clipboard] Check error:', err.message);
+  }
+}
+
+function uploadClipboardImage(buffer, mimeType, size) {
+  if (!serverUrl || !sessionId) return;
+
+  try {
+    const isHttps = serverUrl.startsWith('https');
+    const httpLib = isHttps ? require('https') : require('http');
+    const url = new URL('/api/clipboard-image', serverUrl);
+
+    const req = httpLib.request(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': mimeType,
+        'Content-Length': buffer.length,
+        'x-session-id': sessionId
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.success) {
+            sendToRenderer('clipboard-sent', {
+              contentType: 'image',
+              size: buffer.length
+            });
+            console.log(`[Clipboard] Image uploaded: ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB) via ${mimeType}`);
+          } else {
+            console.error('[Clipboard] Image upload failed:', json.error);
+            sendToRenderer('clipboard-error', { message: json.error || 'Image upload failed' });
+          }
+        } catch (e) {
+          console.error('[Clipboard] Invalid upload response');
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      console.error('[Clipboard] Image upload error:', err.message);
+      sendToRenderer('clipboard-error', { message: `Image send failed: ${err.message}` });
+    });
+
+    req.setTimeout(30000, () => {
+      req.destroy();
+      console.error('[Clipboard] Image upload timeout');
+    });
+
+    req.write(buffer);
+    req.end();
+  } catch (err) {
+    console.error('[Clipboard] uploadClipboardImage error:', err.message);
+  }
+}
+
+function uploadClipboardText(text) {
+  if (!serverUrl || !sessionId) return;
+
+  try {
+    const isHttps = serverUrl.startsWith('https');
+    const httpLib = isHttps ? require('https') : require('http');
+    const url = new URL('/api/clipboard-text', serverUrl);
+    const body = JSON.stringify({ sessionId, content: text });
+
+    const req = httpLib.request(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.success) {
+            sendToRenderer('clipboard-sent', {
+              contentType: 'text',
+              preview: text.length > 60 ? text.slice(0, 60) + '…' : text
+            });
+            console.log(`[Clipboard] Large text uploaded (${text.length} chars)`);
+          }
+        } catch (e) {}
+      });
+    });
+
+    req.on('error', (err) => console.error('[Clipboard] Text upload error:', err.message));
+    req.write(body);
+    req.end();
+  } catch (err) {
+    console.error('[Clipboard] uploadClipboardText error:', err.message);
   }
 }
 

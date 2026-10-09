@@ -10,6 +10,8 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 app.use(cors());
+// Raw binary body parser for clipboard images (must be before express.json)
+app.use('/api/clipboard-image', express.raw({ type: '*/*', limit: '50mb' }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -20,6 +22,9 @@ const pairingCodes = new Map();
 const sessions = new Map();
 // wsToSession: WeakMap to look up session from ws
 const wsToSession = new WeakMap();
+// imageStore: { imageId: { buffer, mimeType, timestamp } }
+const imageStore = new Map();
+const MAX_STORED_IMAGES = 40;
 
 const PAIRING_CODE_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_HISTORY = 20;
@@ -47,10 +52,37 @@ function cleanExpiredCodes() {
   }
 }
 
+function cleanOldImages() {
+  if (imageStore.size > MAX_STORED_IMAGES) {
+    const keys = Array.from(imageStore.keys());
+    const toRemove = keys.slice(0, imageStore.size - MAX_STORED_IMAGES);
+    toRemove.forEach(k => imageStore.delete(k));
+  }
+}
+
 function sendJson(ws, data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
+    try {
+      ws.send(JSON.stringify(data));
+    } catch (err) {
+      console.error('[WS] Send error:', err.message);
+    }
   }
+}
+
+function getOrCreateSession(sessionId) {
+  let session = sessions.get(sessionId);
+  if (!session) {
+    session = {
+      windowsWs: null,
+      macWs: null,
+      clipboardHistory: [],
+      lastActivity: Date.now(),
+      windowsConnected: false
+    };
+    sessions.set(sessionId, session);
+  }
+  return session;
 }
 
 // ─── REST API ───────────────────────────────────────────────────────────────────
@@ -120,6 +152,8 @@ app.post('/api/pair', (req, res) => {
   const { sessionId } = pairingData;
   pairingCodes.delete(normalizedCode); // one-time use
 
+  getOrCreateSession(sessionId);
+
   console.log(`[Pairing] Code ${normalizedCode} redeemed → Session: ${sessionId.slice(0, 8)}...`);
 
   res.json({
@@ -129,12 +163,111 @@ app.post('/api/pair', (req, res) => {
   });
 });
 
+// Windows uploads an image via HTTP POST (bypasses WebSocket frame size limits)
+app.post('/api/clipboard-image', (req, res) => {
+  const sessionId = req.headers['x-session-id'];
+  const rawMime = req.headers['content-type'] || 'image/png';
+  const mimeType = rawMime.split(';')[0].trim();
+
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: 'Missing x-session-id header' });
+  }
+
+  const buffer = req.body;
+  if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) {
+    return res.status(400).json({ success: false, error: 'Empty or invalid image data' });
+  }
+
+  const session = getOrCreateSession(sessionId);
+  const imageId = uuidv4();
+
+  cleanOldImages();
+  imageStore.set(imageId, {
+    buffer,
+    mimeType,
+    timestamp: Date.now()
+  });
+
+  const item = {
+    id: imageId,
+    contentType: 'image',
+    content: null, // Streamed via GET /api/clipboard-image/:id
+    mimeType,
+    timestamp: Date.now(),
+    size: buffer.length
+  };
+
+  session.clipboardHistory.unshift(item);
+  if (session.clipboardHistory.length > MAX_HISTORY) {
+    session.clipboardHistory = session.clipboardHistory.slice(0, MAX_HISTORY);
+  }
+  session.lastActivity = Date.now();
+
+  // Notify Mac over WebSocket (lightweight ~200B message)
+  if (session.macWs && session.macWs.readyState === WebSocket.OPEN) {
+    sendJson(session.macWs, {
+      type: 'clipboard',
+      item
+    });
+  }
+
+  console.log(`[HTTP Image] ${(buffer.length / 1024).toFixed(1)}KB (${mimeType}) → Session: ${sessionId.slice(0, 8)}... (Mac WS open: ${!!(session.macWs && session.macWs.readyState === WebSocket.OPEN)})`);
+
+  res.json({ success: true, id: imageId });
+});
+
+// Mac fetches image binary
+app.get('/api/clipboard-image/:id', (req, res) => {
+  const img = imageStore.get(req.params.id);
+  if (!img) {
+    return res.status(404).send('Image not found or expired');
+  }
+  res.set('Content-Type', img.mimeType);
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.send(img.buffer);
+});
+
+// Large text payload endpoint
+app.post('/api/clipboard-text', (req, res) => {
+  const { sessionId, content } = req.body;
+  if (!sessionId || !content) {
+    return res.status(400).json({ success: false, error: 'Missing parameters' });
+  }
+
+  const session = getOrCreateSession(sessionId);
+  const item = {
+    id: uuidv4(),
+    contentType: 'text',
+    content,
+    mimeType: 'text/plain',
+    timestamp: Date.now(),
+    size: content.length
+  };
+
+  session.clipboardHistory.unshift(item);
+  if (session.clipboardHistory.length > MAX_HISTORY) {
+    session.clipboardHistory = session.clipboardHistory.slice(0, MAX_HISTORY);
+  }
+  session.lastActivity = Date.now();
+
+  if (session.macWs && session.macWs.readyState === WebSocket.OPEN) {
+    sendJson(session.macWs, {
+      type: 'clipboard',
+      item
+    });
+  }
+
+  console.log(`[HTTP Text] ${content.length} chars → Session: ${sessionId.slice(0, 8)}...`);
+  res.json({ success: true, id: item.id });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     activeSessions: sessions.size,
-    pendingCodes: pairingCodes.size
+    pendingCodes: pairingCodes.size,
+    cachedImages: imageStore.size
   });
 });
 
@@ -148,7 +281,6 @@ app.get('*', (req, res) => {
 wss.on('connection', (ws, req) => {
   let sessionId = null;
   let role = null; // 'windows' or 'mac'
-  let alive = true;
 
   ws.isAlive = true;
 
@@ -169,12 +301,14 @@ wss.on('connection', (ws, req) => {
       case 'register': {
         sessionId = msg.sessionId;
         role = msg.role; // 'windows' or 'mac'
-        const session = sessions.get(sessionId);
 
-        if (!session) {
-          sendJson(ws, { type: 'error', message: 'Session not found. Please re-pair.' });
+        if (!sessionId) {
+          sendJson(ws, { type: 'error', message: 'Missing sessionId.' });
           return;
         }
+
+        // Auto-restore session if server restarted
+        const session = getOrCreateSession(sessionId);
 
         if (role === 'windows') {
           // Close old windows connection if exists
@@ -227,17 +361,38 @@ wss.on('connection', (ws, req) => {
       // ── Clipboard Data (Windows → Server → Mac) ──────────────────────────
       case 'clipboard': {
         if (role !== 'windows' || !sessionId) return;
-        const session = sessions.get(sessionId);
-        if (!session) return;
+        const session = getOrCreateSession(sessionId);
 
-        const item = {
-          id: uuidv4(),
-          contentType: msg.contentType, // 'text' or 'image'
-          content: msg.content,         // text string or base64 image
-          mimeType: msg.mimeType || null,
-          timestamp: Date.now(),
-          size: msg.content ? msg.content.length : 0
-        };
+        let item;
+        if (msg.contentType === 'image' && msg.content) {
+          // If sent via WS base64 fallback, store in imageStore
+          const imageId = uuidv4();
+          const buf = Buffer.from(msg.content, 'base64');
+          cleanOldImages();
+          imageStore.set(imageId, {
+            buffer: buf,
+            mimeType: msg.mimeType || 'image/png',
+            timestamp: Date.now()
+          });
+
+          item = {
+            id: imageId,
+            contentType: 'image',
+            content: null,
+            mimeType: msg.mimeType || 'image/png',
+            timestamp: Date.now(),
+            size: buf.length
+          };
+        } else {
+          item = {
+            id: uuidv4(),
+            contentType: msg.contentType,
+            content: msg.content,
+            mimeType: msg.mimeType || null,
+            timestamp: Date.now(),
+            size: msg.content ? msg.content.length : 0
+          };
+        }
 
         // Add to history (newest first)
         session.clipboardHistory.unshift(item);

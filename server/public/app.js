@@ -379,9 +379,12 @@
     } else if (latest.contentType === 'image') {
       els.metaType.textContent = 'Image';
       els.contentText.style.display = 'none';
-      els.contentImage.style.display = '';
-      els.imagePreview.src = `data:${latest.mimeType || 'image/png'};base64,${latest.content}`;
-      els.imageSize.textContent = formatBytes(latest.content.length * 0.75); // base64 overhead
+      els.contentImage.style.display = 'block';
+      const imgSrc = latest.content
+        ? `data:${latest.mimeType || 'image/png'};base64,${latest.content}`
+        : `/api/clipboard-image/${latest.id}`;
+      els.imagePreview.src = imgSrc;
+      els.imageSize.textContent = formatBytes(latest.size || 0);
     }
   }
 
@@ -416,7 +419,10 @@
       const preview = item.content.length > 80 ? item.content.slice(0, 80) + '…' : item.content;
       contentHtml = `<span class="history-text">${escapeHtml(preview)}</span>`;
     } else {
-      contentHtml = `<img class="history-image-thumb" src="data:${item.mimeType || 'image/png'};base64,${item.content}" alt="Image">`;
+      const thumbSrc = item.content
+        ? `data:${item.mimeType || 'image/png'};base64,${item.content}`
+        : `/api/clipboard-image/${item.id}`;
+      contentHtml = `<img class="history-image-thumb" src="${thumbSrc}" alt="Image">`;
     }
 
     div.innerHTML = `
@@ -440,7 +446,7 @@
       if (item.contentType === 'text') {
         copyTextToClipboard(item.content, copyBtn);
       } else {
-        copyImageToClipboard(item.content, item.mimeType, copyBtn);
+        copyImageToClipboard(item, copyBtn);
       }
     });
 
@@ -459,7 +465,7 @@
     if (clipboardHistory.length === 0) return;
     const latest = clipboardHistory[0];
     if (latest.contentType !== 'image') return;
-    await copyImageToClipboard(latest.content, latest.mimeType, els.btnCopyImage);
+    await copyImageToClipboard(latest, els.btnCopyImage);
   }
 
   function downloadLatestImage() {
@@ -468,8 +474,11 @@
     if (latest.contentType !== 'image') return;
 
     const link = document.createElement('a');
-    link.href = `data:${latest.mimeType || 'image/png'};base64,${latest.content}`;
-    link.download = `clipboard-image-${Date.now()}.png`;
+    link.href = latest.content
+      ? `data:${latest.mimeType || 'image/png'};base64,${latest.content}`
+      : `/api/clipboard-image/${latest.id}`;
+    const ext = (latest.mimeType && latest.mimeType.includes('jpeg')) ? 'jpg' : 'png';
+    link.download = `clipboard-image-${Date.now()}.${ext}`;
     link.click();
     showToast('💾', 'Image downloaded');
   }
@@ -494,17 +503,41 @@
     }
   }
 
-  async function copyImageToClipboard(base64Content, mimeType, btnEl) {
+  async function copyImageToClipboard(item, btnEl) {
     try {
-      const byteChars = atob(base64Content);
-      const byteArray = new Uint8Array(byteChars.length);
-      for (let i = 0; i < byteChars.length; i++) {
-        byteArray[i] = byteChars.charCodeAt(i);
+      let blob;
+      if (item.content) {
+        const byteChars = atob(item.content);
+        const byteArray = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) {
+          byteArray[i] = byteChars.charCodeAt(i);
+        }
+        blob = new Blob([byteArray], { type: item.mimeType || 'image/png' });
+      } else {
+        const res = await fetch(`/api/clipboard-image/${item.id}`);
+        blob = await res.blob();
       }
-      const blob = new Blob([byteArray], { type: mimeType || 'image/png' });
+
+      // Convert to PNG blob if needed because macOS Safari & Chrome require image/png for ClipboardItem
+      if (blob.type !== 'image/png') {
+        const img = new Image();
+        const url = URL.createObjectURL(blob);
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = url;
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+        blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      }
 
       await navigator.clipboard.write([
-        new ClipboardItem({ [blob.type]: blob })
+        new ClipboardItem({ 'image/png': blob })
       ]);
       animateCopyButton(btnEl);
       showToast('✅', 'Image copied to clipboard');
