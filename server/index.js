@@ -10,9 +10,10 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 app.use(cors());
-// Raw binary body parser for clipboard images and chunks (must be before express.json)
+// Raw binary body parser for clipboard images, texts, and chunks (must be before express.json)
 app.use('/api/clipboard-image', express.raw({ type: '*/*', limit: '50mb' }));
 app.use('/api/clipboard-image-chunk', express.raw({ type: '*/*', limit: '50mb' }));
+app.use('/api/clipboard-text-chunk', express.raw({ type: '*/*', limit: '50mb' }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -27,7 +28,13 @@ const wsToSession = new WeakMap();
 const imageStore = new Map();
 // pendingImageChunks: { imageId: { chunks, totalChunks, received, mimeType, sessionId, createdAt } }
 const pendingImageChunks = new Map();
+// textStore: { textId: { content, timestamp, size } }
+const textStore = new Map();
+// pendingTextChunks: { textId: { chunks, totalChunks, received, sessionId, createdAt } }
+const pendingTextChunks = new Map();
+
 const MAX_STORED_IMAGES = 40;
+const MAX_STORED_TEXTS = 50;
 
 const PAIRING_CODE_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_HISTORY = 20;
@@ -60,6 +67,14 @@ function cleanOldImages() {
     const keys = Array.from(imageStore.keys());
     const toRemove = keys.slice(0, imageStore.size - MAX_STORED_IMAGES);
     toRemove.forEach(k => imageStore.delete(k));
+  }
+}
+
+function cleanOldTexts() {
+  if (textStore.size > MAX_STORED_TEXTS) {
+    const keys = Array.from(textStore.keys());
+    const toRemove = keys.slice(0, textStore.size - MAX_STORED_TEXTS);
+    toRemove.forEach(k => textStore.delete(k));
   }
 }
 
@@ -308,18 +323,118 @@ app.get('/api/clipboard-image/:id', (req, res) => {
   res.send(img.buffer);
 });
 
-// Large text payload endpoint
+// Windows uploads large text in resilient 4KB chunks (unlimited characters)
+app.post('/api/clipboard-text-chunk', (req, res) => {
+  const sessionId = req.headers['x-session-id'];
+  const textId = req.headers['x-text-id'];
+  const chunkIndex = parseInt(req.headers['x-chunk-index'], 10);
+  const totalChunks = parseInt(req.headers['x-total-chunks'], 10);
+
+  if (!sessionId || !textId || isNaN(chunkIndex) || isNaN(totalChunks)) {
+    return res.status(400).json({ success: false, error: 'Missing text chunk headers' });
+  }
+
+  const chunkBuffer = req.body;
+  if (!chunkBuffer || !Buffer.isBuffer(chunkBuffer)) {
+    return res.status(400).json({ success: false, error: 'Invalid chunk buffer' });
+  }
+
+  let pending = pendingTextChunks.get(textId);
+  if (!pending) {
+    pending = {
+      chunks: new Array(totalChunks),
+      totalChunks,
+      received: 0,
+      sessionId,
+      createdAt: Date.now()
+    };
+    pendingTextChunks.set(textId, pending);
+  }
+
+  if (!pending.chunks[chunkIndex]) {
+    pending.chunks[chunkIndex] = chunkBuffer;
+    pending.received++;
+  }
+
+  // All chunks received -> assemble full text and notify Mac!
+  if (pending.received >= pending.totalChunks) {
+    pendingTextChunks.delete(textId);
+    const fullBuffer = Buffer.concat(pending.chunks);
+    const fullText = fullBuffer.toString('utf8');
+
+    const session = getOrCreateSession(sessionId);
+    cleanOldTexts();
+    textStore.set(textId, {
+      content: fullText,
+      timestamp: Date.now(),
+      size: fullText.length
+    });
+
+    const item = {
+      id: textId,
+      contentType: 'text',
+      content: null, // Streamed via GET /api/clipboard-text/:id
+      isLarge: true,
+      preview: fullText.length > 100 ? fullText.slice(0, 100) + '…' : fullText,
+      mimeType: 'text/plain',
+      timestamp: Date.now(),
+      size: fullText.length
+    };
+
+    session.clipboardHistory.unshift(item);
+    if (session.clipboardHistory.length > MAX_HISTORY) {
+      session.clipboardHistory = session.clipboardHistory.slice(0, MAX_HISTORY);
+    }
+    session.lastActivity = Date.now();
+
+    if (session.macWs && session.macWs.readyState === WebSocket.OPEN) {
+      sendJson(session.macWs, {
+        type: 'clipboard',
+        item
+      });
+    }
+
+    console.log(`[Chunked Text Complete] ${fullText.length} chars (${totalChunks} chunks) → Session: ${sessionId.slice(0, 8)}... (Mac WS open: ${!!(session.macWs && session.macWs.readyState === WebSocket.OPEN)})`);
+    return res.json({ success: true, complete: true, id: textId });
+  }
+
+  res.json({ success: true, complete: false, received: pending.received, total: totalChunks });
+});
+
+// Mac fetches full text content
+app.get('/api/clipboard-text/:id', (req, res) => {
+  const item = textStore.get(req.params.id);
+  if (!item) {
+    return res.status(404).send('Text not found or expired');
+  }
+  res.set('Content-Type', 'text/plain; charset=utf-8');
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.send(item.content);
+});
+
+// Direct text endpoint (fallback)
 app.post('/api/clipboard-text', (req, res) => {
   const { sessionId, content } = req.body;
-  if (!sessionId || !content) {
+  if (!sessionId || typeof content !== 'string') {
     return res.status(400).json({ success: false, error: 'Missing parameters' });
   }
 
   const session = getOrCreateSession(sessionId);
-  const item = {
-    id: uuidv4(),
-    contentType: 'text',
+  const textId = uuidv4();
+  cleanOldTexts();
+  textStore.set(textId, {
     content,
+    timestamp: Date.now(),
+    size: content.length
+  });
+
+  const isLarge = content.length > 8000;
+  const item = {
+    id: textId,
+    contentType: 'text',
+    content: isLarge ? null : content,
+    isLarge,
+    preview: content.length > 100 ? content.slice(0, 100) + '…' : content,
     mimeType: 'text/plain',
     timestamp: Date.now(),
     size: content.length
@@ -339,7 +454,7 @@ app.post('/api/clipboard-text', (req, res) => {
   }
 
   console.log(`[HTTP Text] ${content.length} chars → Session: ${sessionId.slice(0, 8)}...`);
-  res.json({ success: true, id: item.id });
+  res.json({ success: true, id: textId });
 });
 
 // Health check
@@ -348,7 +463,8 @@ app.get('/api/health', (req, res) => {
     status: 'ok',
     activeSessions: sessions.size,
     pendingCodes: pairingCodes.size,
-    cachedImages: imageStore.size
+    cachedImages: imageStore.size,
+    cachedTexts: textStore.size
   });
 });
 
@@ -465,14 +581,37 @@ wss.on('connection', (ws, req) => {
             size: buf.length
           };
         } else {
-          item = {
-            id: uuidv4(),
-            contentType: msg.contentType,
-            content: msg.content,
-            mimeType: msg.mimeType || null,
-            timestamp: Date.now(),
-            size: msg.content ? msg.content.length : 0
-          };
+          const contentStr = typeof msg.content === 'string' ? msg.content : String(msg.content || '');
+          const byteLen = Buffer.byteLength(contentStr, 'utf8');
+
+          if (byteLen > 8000) {
+            const textId = uuidv4();
+            cleanOldTexts();
+            textStore.set(textId, {
+              content: contentStr,
+              timestamp: Date.now(),
+              size: contentStr.length
+            });
+            item = {
+              id: textId,
+              contentType: 'text',
+              content: null,
+              isLarge: true,
+              preview: contentStr.length > 100 ? contentStr.slice(0, 100) + '…' : contentStr,
+              mimeType: 'text/plain',
+              timestamp: Date.now(),
+              size: contentStr.length
+            };
+          } else {
+            item = {
+              id: uuidv4(),
+              contentType: 'text',
+              content: contentStr,
+              mimeType: 'text/plain',
+              timestamp: Date.now(),
+              size: contentStr.length
+            };
+          }
         }
 
         // Add to history (newest first)

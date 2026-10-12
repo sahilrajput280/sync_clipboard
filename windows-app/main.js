@@ -530,15 +530,16 @@ function checkClipboard() {
       }
     }
 
-    // Check for text
+    // Check for text (supports any text type, formatting, spaces, code, emojis, unlimited length)
     const text = clipboard.readText();
-    if (text && text !== lastClipboardText && text.trim().length > 0) {
+    if (typeof text === 'string' && text !== lastClipboardText && text.length > 0) {
       lastClipboardText = text;
       lastClipboardImageHash = ''; // Reset image hash so next image is captured reliably
 
-      if (text.length > 15000) {
-        uploadClipboardText(text);
-      } else {
+      const byteLength = Buffer.byteLength(text, 'utf8');
+
+      // If text fits safely in a single WebSocket frame (<= 8KB), send immediately via WebSocket!
+      if (byteLength <= 8192) {
         ws.send(JSON.stringify({
           type: 'clipboard',
           contentType: 'text',
@@ -550,7 +551,10 @@ function checkClipboard() {
           preview: text.length > 60 ? text.slice(0, 60) + '…' : text
         });
 
-        console.log(`[Clipboard] Text sent (${text.length} chars)`);
+        console.log(`[Clipboard] Text sent via WS (${text.length} chars, ${byteLength} bytes)`);
+      } else {
+        // For large text (> 8KB to ANY size), stream using our resilient 4KB chunking engine!
+        uploadClipboardText(text);
       }
     }
   } catch (err) {
@@ -650,43 +654,95 @@ async function uploadClipboardImage(buffer, mimeType, size) {
   }
 }
 
-function uploadClipboardText(text) {
+async function uploadClipboardText(text) {
   if (!serverUrl || !sessionId) return;
 
-  try {
-    const isHttps = serverUrl.startsWith('https');
-    const httpLib = isHttps ? require('https') : require('http');
-    const url = new URL('/api/clipboard-text', serverUrl);
-    const body = JSON.stringify({ sessionId, content: text });
+  const crypto = require('crypto');
+  const textId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now();
+  const textBuffer = Buffer.from(text, 'utf8');
+  const CHUNK_SIZE = 4096; // 4KB chunks ensure 100% transmission across any ISP, CGNAT, or Cloudflare edge
+  const totalChunks = Math.ceil(textBuffer.length / CHUNK_SIZE);
 
-    const req = httpLib.request(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body)
-      }
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          if (json.success) {
-            sendToRenderer('clipboard-sent', {
-              contentType: 'text',
-              preview: text.length > 60 ? text.slice(0, 60) + '…' : text
-            });
-            console.log(`[Clipboard] Large text uploaded (${text.length} chars)`);
+  console.log(`[Clipboard] Uploading large text: ${text.length} chars (${(textBuffer.length / 1024).toFixed(1)}KB) in ${totalChunks} chunks...`);
+
+  const isHttps = serverUrl.startsWith('https');
+  const httpLib = isHttps ? require('https') : require('http');
+
+  function sendOneTextChunk(index, chunkBuffer, maxRetries = 6) {
+    return new Promise((resolve, reject) => {
+      let attempt = 0;
+
+      function trySend() {
+        attempt++;
+        const url = new URL('/api/clipboard-text-chunk', serverUrl);
+        const req = httpLib.request(url, {
+          method: 'POST',
+          agent: false, // Fresh socket every time prevents TLS poisoning/fragmentation
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': chunkBuffer.length,
+            'x-session-id': sessionId,
+            'x-text-id': textId,
+            'x-chunk-index': String(index),
+            'x-total-chunks': String(totalChunks)
           }
-        } catch (e) {}
-      });
-    });
+        }, (res) => {
+          let data = '';
+          res.on('data', c => data += c);
+          res.on('end', () => {
+            if (res.statusCode === 200) {
+              resolve();
+            } else {
+              if (attempt < maxRetries) {
+                setTimeout(trySend, 150 * attempt);
+              } else {
+                reject(new Error(`Server returned HTTP ${res.statusCode}`));
+              }
+            }
+          });
+        });
 
-    req.on('error', (err) => console.error('[Clipboard] Text upload error:', err.message));
-    req.write(body);
-    req.end();
+        req.on('error', (err) => {
+          if (attempt < maxRetries) {
+            setTimeout(trySend, 150 * attempt);
+          } else {
+            reject(err);
+          }
+        });
+
+        req.setTimeout(15000, () => {
+          req.destroy();
+          if (attempt < maxRetries) {
+            setTimeout(trySend, 150 * attempt);
+          } else {
+            reject(new Error('Text chunk upload timed out'));
+          }
+        });
+
+        req.write(chunkBuffer);
+        req.end();
+      }
+
+      trySend();
+    });
+  }
+
+  try {
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, textBuffer.length);
+      const chunk = textBuffer.subarray(start, end);
+      await sendOneTextChunk(i, chunk);
+    }
+
+    sendToRenderer('clipboard-sent', {
+      contentType: 'text',
+      preview: text.length > 60 ? text.slice(0, 60) + '…' : text
+    });
+    console.log(`[Clipboard] Large text uploaded successfully: ${text.length} chars (${(textBuffer.length / 1024).toFixed(1)}KB)`);
   } catch (err) {
-    console.error('[Clipboard] uploadClipboardText error:', err.message);
+    console.error('[Clipboard] Large text upload failed:', err.message);
+    sendToRenderer('clipboard-error', { message: `Text send failed: ${err.message}` });
   }
 }
 

@@ -20,6 +20,23 @@
   let clipboardHistory = [];
   let isWindowsConnected = false;
   let toastTimer = null;
+  const textCache = new Map();
+
+  async function fetchTextById(id) {
+    if (textCache.has(id)) {
+      return textCache.get(id);
+    }
+    try {
+      const res = await fetch(`/api/clipboard-text/${id}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      textCache.set(id, text);
+      return text;
+    } catch (err) {
+      console.error('[Text] Failed to fetch full text:', err);
+      return null;
+    }
+  }
 
   // ─── DOM Elements ───────────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
@@ -44,6 +61,7 @@
     contentText: $('contentText'),
     textPreview: $('textPreview'),
     btnCopyText: $('btnCopyText'),
+    btnDownloadText: $('btnDownloadText'),
     charCount: $('charCount'),
     contentImage: $('contentImage'),
     imagePreview: $('imagePreview'),
@@ -115,8 +133,11 @@
     });
     els.pairingCode.addEventListener('input', formatPairingInput);
 
-    // Copy actions
+    // Copy & Download actions
     els.btnCopyText.addEventListener('click', () => copyLatestText());
+    if (els.btnDownloadText) {
+      els.btnDownloadText.addEventListener('click', () => downloadLatestText());
+    }
     els.btnCopyImage.addEventListener('click', () => copyLatestImage());
     els.btnDownloadImage.addEventListener('click', () => downloadLatestImage());
 
@@ -349,8 +370,8 @@
 
     // Show toast
     if (item.contentType === 'text') {
-      const preview = item.content.length > 40 ? item.content.slice(0, 40) + '…' : item.content;
-      showToast('📋', `Text received: "${preview}"`);
+      const charCount = item.size !== undefined ? item.size : (item.content ? item.content.length : 0);
+      showToast('📋', `Text received (${charCount.toLocaleString()} chars)`);
     } else {
       showToast('🖼️', 'Image received');
     }
@@ -374,8 +395,26 @@
       els.metaType.textContent = 'Text';
       els.contentText.style.display = '';
       els.contentImage.style.display = 'none';
-      els.textPreview.textContent = latest.content;
-      els.charCount.textContent = `${latest.content.length.toLocaleString()} chars`;
+
+      const totalChars = latest.size !== undefined ? latest.size : (latest.content ? latest.content.length : 0);
+      els.charCount.textContent = `${totalChars.toLocaleString()} chars`;
+
+      if (latest.content !== null && latest.content !== undefined) {
+        els.textPreview.textContent = latest.content;
+      } else if (latest.isLarge && latest.id) {
+        els.textPreview.textContent = (latest.preview || '') + '\n\n[Loading complete text (' + totalChars.toLocaleString() + ' chars)...]';
+        fetchTextById(latest.id).then((fullText) => {
+          if (fullText !== null) {
+            latest.content = fullText;
+            if (clipboardHistory.length > 0 && clipboardHistory[0].id === latest.id) {
+              els.textPreview.textContent = fullText;
+              els.charCount.textContent = `${fullText.length.toLocaleString()} chars`;
+            }
+          }
+        });
+      } else {
+        els.textPreview.textContent = latest.preview || '';
+      }
     } else if (latest.contentType === 'image') {
       els.metaType.textContent = 'Image';
       els.contentText.style.display = 'none';
@@ -416,7 +455,15 @@
 
     let contentHtml;
     if (item.contentType === 'text') {
-      const preview = item.content.length > 80 ? item.content.slice(0, 80) + '…' : item.content;
+      let preview = '';
+      if (item.content) {
+        preview = item.content.length > 80 ? item.content.slice(0, 80) + '…' : item.content;
+      } else if (item.preview) {
+        preview = item.preview;
+      } else {
+        const size = item.size || 0;
+        preview = `[Text: ${size.toLocaleString()} characters]`;
+      }
       contentHtml = `<span class="history-text">${escapeHtml(preview)}</span>`;
     } else {
       const thumbSrc = item.content
@@ -442,9 +489,21 @@
 
     // Copy button handler
     const copyBtn = div.querySelector('.history-copy-btn');
-    copyBtn.addEventListener('click', () => {
+    copyBtn.addEventListener('click', async () => {
       if (item.contentType === 'text') {
-        copyTextToClipboard(item.content, copyBtn);
+        if (item.content !== null && item.content !== undefined) {
+          copyTextToClipboard(item.content, copyBtn);
+        } else if (item.isLarge && item.id) {
+          copyBtn.disabled = true;
+          const fullText = await fetchTextById(item.id);
+          copyBtn.disabled = false;
+          if (fullText !== null) {
+            item.content = fullText;
+            copyTextToClipboard(fullText, copyBtn);
+          } else {
+            showToast('⚠️', 'Failed to load text');
+          }
+        }
       } else {
         copyImageToClipboard(item, copyBtn);
       }
@@ -458,7 +517,51 @@
     if (clipboardHistory.length === 0) return;
     const latest = clipboardHistory[0];
     if (latest.contentType !== 'text') return;
-    await copyTextToClipboard(latest.content, els.btnCopyText);
+
+    if (latest.content !== null && latest.content !== undefined) {
+      await copyTextToClipboard(latest.content, els.btnCopyText);
+    } else if (latest.isLarge && latest.id) {
+      els.btnCopyText.disabled = true;
+      const origHtml = els.btnCopyText.innerHTML;
+      els.btnCopyText.innerHTML = '<span class="spinner"></span><span>Loading…</span>';
+      const fullText = await fetchTextById(latest.id);
+      els.btnCopyText.disabled = false;
+      els.btnCopyText.innerHTML = origHtml;
+      if (fullText !== null) {
+        latest.content = fullText;
+        await copyTextToClipboard(fullText, els.btnCopyText);
+      } else {
+        showToast('⚠️', 'Failed to load text');
+      }
+    }
+  }
+
+  async function downloadLatestText() {
+    if (clipboardHistory.length === 0) return;
+    const latest = clipboardHistory[0];
+    if (latest.contentType !== 'text') return;
+
+    let textToDownload = latest.content;
+    if (textToDownload === null || textToDownload === undefined) {
+      if (latest.isLarge && latest.id) {
+        showToast('⏳', 'Loading text for download…');
+        textToDownload = await fetchTextById(latest.id);
+      }
+    }
+
+    if (typeof textToDownload !== 'string') {
+      showToast('⚠️', 'Could not load text for download');
+      return;
+    }
+
+    const blob = new Blob([textToDownload], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `clipboard-text-${Date.now()}.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showToast('💾', 'Text downloaded (.txt)');
   }
 
   async function copyLatestImage() {

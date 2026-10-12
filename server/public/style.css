@@ -691,8 +691,9 @@ body {
 .meta-type {
   padding: 2px 8px;
   border-radius: var(--radius-full);
-  background: rgba(99, 102, 241, 0.15);
-  color: var(--accent-primary-hover);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
   font-weight: 600;
   font-size: 0.7rem;
   text-transform: uppercase;
