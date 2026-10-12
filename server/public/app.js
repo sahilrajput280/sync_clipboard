@@ -71,6 +71,7 @@
     historySection: $('historySection'),
     historyList: $('historyList'),
     btnClearHistory: $('btnClearHistory'),
+    btnClearLatest: $('btnClearLatest'),
     btnDisconnect: $('btnDisconnect'),
     toast: $('toast'),
     toastIcon: $('toastIcon'),
@@ -141,8 +142,13 @@
     els.btnCopyImage.addEventListener('click', () => copyLatestImage());
     els.btnDownloadImage.addEventListener('click', () => downloadLatestImage());
 
-    // History
-    els.btnClearHistory.addEventListener('click', clearHistory);
+    // Clear clipboard data & history
+    if (els.btnClearLatest) {
+      els.btnClearLatest.addEventListener('click', clearAllClipboard);
+    }
+    if (els.btnClearHistory) {
+      els.btnClearHistory.addEventListener('click', clearAllClipboard);
+    }
 
     // Disconnect
     els.btnDisconnect.addEventListener('click', handleDisconnect);
@@ -290,6 +296,14 @@
 
         case 'error':
           showToast('⚠️', msg.message);
+          break;
+
+        case 'history-cleared':
+          clipboardHistory = [];
+          textCache.clear();
+          renderLatest();
+          renderHistory();
+          showToast('🗑️', 'Clipboard data cleared');
           break;
 
         case 'replaced':
@@ -667,13 +681,31 @@
     }, 1500);
   }
 
-  // ─── History ────────────────────────────────────────────────────────────────
-  function clearHistory() {
-    if (clipboardHistory.length <= 1) return;
-    const latest = clipboardHistory[0];
-    clipboardHistory = [latest];
+  // ─── Clear All Clipboard Data ──────────────────────────────────────────────
+  async function clearAllClipboard() {
+    if (clipboardHistory.length === 0) return;
+    if (!confirm('Clear all clipboard data and history from server and screen?')) return;
+
+    clipboardHistory = [];
+    textCache.clear();
+    renderLatest();
     renderHistory();
-    showToast('🗑️', 'History cleared');
+    showToast('🗑️', 'Clipboard cleared');
+
+    if (sessionId) {
+      try {
+        await fetch('/api/clear-history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId })
+        });
+      } catch (err) {
+        console.error('[Clear] Server clear failed:', err);
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'clear-history', sessionId }));
+      }
+    }
   }
 
   // ─── Disconnect ─────────────────────────────────────────────────────────────

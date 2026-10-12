@@ -179,6 +179,23 @@
       setStatus('reconnecting', 'Reconnecting…');
     });
 
+    api.onClipboardQueued((data) => {
+      if (data.contentType === 'image') {
+        const sizeKb = (data.size / 1024).toFixed(1);
+        addActivity('⏳', `Screenshot queued (${sizeKb} KB)`);
+      } else {
+        addActivity('⏳', `Text queued (${data.size} chars)`);
+      }
+    });
+
+    api.onClipboardRetry((data) => {
+      addActivity('🔄', `Retrying send (attempt ${data.attempt})...`);
+    });
+
+    api.onHistoryCleared(() => {
+      addActivity('🗑️', 'Clipboard data cleared from web');
+    });
+
     api.onReplaced((data) => {
       setStatus('disconnected', 'Replaced by another instance');
       addActivity('⚠️', 'Another Windows instance connected');

@@ -181,6 +181,39 @@ app.post('/api/pair', (req, res) => {
   });
 });
 
+// Clear entire clipboard history and stored items for a session
+app.post('/api/clear-history', (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: 'Missing sessionId' });
+  }
+
+  const session = sessions.get(sessionId);
+  if (session) {
+    for (const item of session.clipboardHistory) {
+      if (item.id) {
+        imageStore.delete(item.id);
+        textStore.delete(item.id);
+        pendingImageChunks.delete(item.id);
+        pendingTextChunks.delete(item.id);
+      }
+    }
+    session.clipboardHistory = [];
+    session.lastActivity = Date.now();
+
+    // Broadcast to connected Mac and Windows clients
+    if (session.macWs && session.macWs.readyState === WebSocket.OPEN) {
+      sendJson(session.macWs, { type: 'history-cleared' });
+    }
+    if (session.windowsWs && session.windowsWs.readyState === WebSocket.OPEN) {
+      sendJson(session.windowsWs, { type: 'history-cleared' });
+    }
+    console.log(`[Clear] All clipboard data cleared on Render for session: ${sessionId.slice(0, 8)}...`);
+  }
+
+  res.json({ success: true, message: 'Clipboard data cleared from server' });
+});
+
 // Windows uploads an image via HTTP POST (bypasses WebSocket frame size limits)
 app.post('/api/clipboard-image', (req, res) => {
   const sessionId = req.headers['x-session-id'];
@@ -640,6 +673,34 @@ wss.on('connection', (ws, req) => {
           if (session) {
             session.lastActivity = Date.now();
             sendJson(ws, { type: 'heartbeat-ack' });
+          }
+        }
+        break;
+      }
+
+      // ── Clear History ───────────────────────────────────────────────────
+      case 'clear-history': {
+        const sid = msg.sessionId || sessionId;
+        if (sid) {
+          const session = sessions.get(sid);
+          if (session) {
+            for (const item of session.clipboardHistory) {
+              if (item.id) {
+                imageStore.delete(item.id);
+                textStore.delete(item.id);
+                pendingImageChunks.delete(item.id);
+                pendingTextChunks.delete(item.id);
+              }
+            }
+            session.clipboardHistory = [];
+            session.lastActivity = Date.now();
+            if (session.macWs && session.macWs.readyState === WebSocket.OPEN) {
+              sendJson(session.macWs, { type: 'history-cleared' });
+            }
+            if (session.windowsWs && session.windowsWs.readyState === WebSocket.OPEN) {
+              sendJson(session.windowsWs, { type: 'history-cleared' });
+            }
+            console.log(`[WS Clear] Clipboard data cleared on Render for session: ${sid.slice(0, 8)}...`);
           }
         }
         break;

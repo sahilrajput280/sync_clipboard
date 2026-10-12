@@ -16,6 +16,7 @@ const {
   shell
 } = require('electron');
 const path = require('path');
+const crypto = require('crypto');
 const WebSocket = require('ws');
 const Store = require('electron-store');
 
@@ -50,6 +51,11 @@ let isConnected = false;
 let isPaired = false;
 let sessionId = null;
 let serverUrl = '';
+
+// Resilient Outbox Queue State
+const outboxQueue = [];
+let isOutboxProcessing = false;
+let outboxRetryTimer = null;
 
 // ─── Single Instance Lock ───────────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
@@ -305,6 +311,11 @@ ipcMain.handle('disconnect', () => {
   isConnected = false;
   sessionId = null;
   store.delete('sessionId');
+  outboxQueue.length = 0;
+  if (outboxRetryTimer) {
+    clearTimeout(outboxRetryTimer);
+    outboxRetryTimer = null;
+  }
   stopClipboardMonitor();
   if (ws) ws.close();
   if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -359,6 +370,7 @@ function connectWebSocket() {
   ws.on('open', () => {
     console.log('[WS] Connected to server');
     reconnectAttempts = 0;
+    flushOutboxQueue();
 
     // Register as Windows
     ws.send(JSON.stringify({
@@ -384,6 +396,7 @@ function connectWebSocket() {
         if (isPaired) {
           startClipboardMonitor();
         }
+        flushOutboxQueue();
         sendToRenderer('connected', { isPaired, message: msg.message });
         console.log('[WS] Registered as Windows (paired=' + isPaired + ')');
         break;
@@ -397,12 +410,20 @@ function connectWebSocket() {
         store.set('sessionId', sessionId);
         startClipboardMonitor();
         updateTrayMenu();
+        flushOutboxQueue();
         sendToRenderer('mac-connected', { message: msg.message });
         console.log('[WS] Mac paired and connected!');
         break;
 
       case 'mac-disconnected':
         sendToRenderer('mac-disconnected', { message: msg.message });
+        break;
+
+      case 'history-cleared':
+        console.log('[WS] Clipboard data cleared from web portal');
+        lastClipboardImageHash = '';
+        lastClipboardText = '';
+        sendToRenderer('history-cleared');
         break;
 
       case 'error':
@@ -493,8 +514,272 @@ function stopClipboardMonitor() {
   }
 }
 
+// ─── Resilient Outbox Queue Engine ───────────────────────────────────────────
+// Ensures screenshots and large data payloads are NEVER lost even when network
+// drops, Wi-Fi disconnects, or socket timeouts occur. Keeps retrying automatically!
+
+function flushOutboxQueue() {
+  if (outboxRetryTimer) {
+    clearTimeout(outboxRetryTimer);
+    outboxRetryTimer = null;
+  }
+  processOutboxQueue();
+}
+
+// Watchdog timer: checks every 5s if any pending items remain in outbox
+setInterval(() => {
+  if (outboxQueue.length > 0 && !isOutboxProcessing) {
+    processOutboxQueue();
+  }
+}, 5000);
+
+function queueScreenshot(buffer, mimeType, size) {
+  const item = {
+    id: crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).substring(2) + Date.now()),
+    type: 'image',
+    buffer,
+    mimeType,
+    size,
+    attempts: 0,
+    enqueuedAt: Date.now()
+  };
+
+  outboxQueue.push(item);
+  console.log(`[Outbox] Enqueued screenshot (${(buffer.length / 1024).toFixed(1)}KB). Queue size: ${outboxQueue.length}`);
+  sendToRenderer('clipboard-queued', { contentType: 'image', size: buffer.length, queueLength: outboxQueue.length });
+  processOutboxQueue();
+}
+
+function queueText(text) {
+  const item = {
+    id: crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).substring(2) + Date.now()),
+    type: 'text',
+    text,
+    attempts: 0,
+    enqueuedAt: Date.now()
+  };
+
+  outboxQueue.push(item);
+  console.log(`[Outbox] Enqueued text (${text.length} chars). Queue size: ${outboxQueue.length}`);
+  sendToRenderer('clipboard-queued', { contentType: 'text', size: text.length, queueLength: outboxQueue.length });
+  processOutboxQueue();
+}
+
+async function processOutboxQueue() {
+  if (isOutboxProcessing) return;
+  if (outboxQueue.length === 0) return;
+  if (!serverUrl || !sessionId) return;
+
+  isOutboxProcessing = true;
+
+  while (outboxQueue.length > 0) {
+    const item = outboxQueue[0];
+    try {
+      if (item.type === 'image') {
+        await uploadImageWithRetries(item);
+      } else if (item.type === 'text') {
+        await uploadTextWithRetries(item);
+      }
+
+      // Delivered successfully! Remove head of queue
+      outboxQueue.shift();
+      console.log(`[Outbox] Delivered successfully to Mac! Remaining in queue: ${outboxQueue.length}`);
+    } catch (err) {
+      item.attempts = (item.attempts || 0) + 1;
+      console.error(`[Outbox] Upload error (attempt ${item.attempts}):`, err.message);
+
+      sendToRenderer('clipboard-retry', {
+        contentType: item.type,
+        attempt: item.attempts,
+        message: err.message
+      });
+
+      // Exponential backoff: 2s, 3s, 4.5s, 6.7s, up to 10s max
+      const delay = Math.min(2000 * Math.pow(1.5, Math.min(item.attempts - 1, 4)), 10000);
+      isOutboxProcessing = false;
+
+      if (outboxRetryTimer) clearTimeout(outboxRetryTimer);
+      outboxRetryTimer = setTimeout(() => {
+        outboxRetryTimer = null;
+        processOutboxQueue();
+      }, delay);
+      return;
+    }
+  }
+
+  isOutboxProcessing = false;
+}
+
+async function uploadImageWithRetries(item) {
+  const { buffer, mimeType, size } = item;
+  const imageId = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).substring(2) + Date.now());
+  const CHUNK_SIZE = 4096;
+  const totalChunks = Math.ceil(buffer.length / CHUNK_SIZE);
+
+  console.log(`[Upload] Uploading screenshot ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB) in ${totalChunks} chunks (attempt ${item.attempts + 1})...`);
+
+  const isHttps = serverUrl.startsWith('https');
+  const httpLib = isHttps ? require('https') : require('http');
+
+  function sendOneChunk(index, chunkBuffer) {
+    return new Promise((resolve, reject) => {
+      let attempt = 0;
+      const maxRetries = 4;
+
+      function trySend() {
+        attempt++;
+        const url = new URL('/api/clipboard-image-chunk', serverUrl);
+        const req = httpLib.request(url, {
+          method: 'POST',
+          agent: false,
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': chunkBuffer.length,
+            'x-session-id': sessionId,
+            'x-image-id': imageId,
+            'x-chunk-index': String(index),
+            'x-total-chunks': String(totalChunks),
+            'x-mime-type': mimeType
+          }
+        }, (res) => {
+          let data = '';
+          res.on('data', c => data += c);
+          res.on('end', () => {
+            if (res.statusCode === 200) {
+              resolve();
+            } else if (attempt < maxRetries) {
+              setTimeout(trySend, 200 * attempt);
+            } else {
+              reject(new Error(`Server returned HTTP ${res.statusCode}`));
+            }
+          });
+        });
+
+        req.on('error', (err) => {
+          if (attempt < maxRetries) {
+            setTimeout(trySend, 200 * attempt);
+          } else {
+            reject(err);
+          }
+        });
+
+        req.setTimeout(12000, () => {
+          req.destroy();
+          if (attempt < maxRetries) {
+            setTimeout(trySend, 200 * attempt);
+          } else {
+            reject(new Error('Chunk upload timed out'));
+          }
+        });
+
+        req.write(chunkBuffer);
+        req.end();
+      }
+
+      trySend();
+    });
+  }
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, buffer.length);
+    const chunk = buffer.subarray(start, end);
+    await sendOneChunk(i, chunk);
+  }
+
+  sendToRenderer('clipboard-sent', {
+    contentType: 'image',
+    size: buffer.length
+  });
+  console.log(`[Upload] Screenshot delivered to Mac: ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB)`);
+}
+
+async function uploadTextWithRetries(item) {
+  const { text } = item;
+  const textId = crypto.randomUUID ? crypto.randomUUID() : (Math.random().toString(36).substring(2) + Date.now());
+  const textBuffer = Buffer.from(text, 'utf8');
+  const CHUNK_SIZE = 4096;
+  const totalChunks = Math.ceil(textBuffer.length / CHUNK_SIZE);
+
+  console.log(`[Upload] Uploading text: ${text.length} chars (${(textBuffer.length / 1024).toFixed(1)}KB) in ${totalChunks} chunks (attempt ${item.attempts + 1})...`);
+
+  const isHttps = serverUrl.startsWith('https');
+  const httpLib = isHttps ? require('https') : require('http');
+
+  function sendOneTextChunk(index, chunkBuffer) {
+    return new Promise((resolve, reject) => {
+      let attempt = 0;
+      const maxRetries = 4;
+
+      function trySend() {
+        attempt++;
+        const url = new URL('/api/clipboard-text-chunk', serverUrl);
+        const req = httpLib.request(url, {
+          method: 'POST',
+          agent: false,
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': chunkBuffer.length,
+            'x-session-id': sessionId,
+            'x-text-id': textId,
+            'x-chunk-index': String(index),
+            'x-total-chunks': String(totalChunks)
+          }
+        }, (res) => {
+          let data = '';
+          res.on('data', c => data += c);
+          res.on('end', () => {
+            if (res.statusCode === 200) {
+              resolve();
+            } else if (attempt < maxRetries) {
+              setTimeout(trySend, 200 * attempt);
+            } else {
+              reject(new Error(`Server returned HTTP ${res.statusCode}`));
+            }
+          });
+        });
+
+        req.on('error', (err) => {
+          if (attempt < maxRetries) {
+            setTimeout(trySend, 200 * attempt);
+          } else {
+            reject(err);
+          }
+        });
+
+        req.setTimeout(12000, () => {
+          req.destroy();
+          if (attempt < maxRetries) {
+            setTimeout(trySend, 200 * attempt);
+          } else {
+            reject(new Error('Text chunk upload timed out'));
+          }
+        });
+
+        req.write(chunkBuffer);
+        req.end();
+      }
+
+      trySend();
+    });
+  }
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, textBuffer.length);
+    const chunk = textBuffer.subarray(start, end);
+    await sendOneTextChunk(i, chunk);
+  }
+
+  sendToRenderer('clipboard-sent', {
+    contentType: 'text',
+    preview: text.length > 60 ? text.slice(0, 60) + '…' : text
+  });
+  console.log(`[Upload] Text delivered to Mac: ${text.length} chars (${(textBuffer.length / 1024).toFixed(1)}KB)`);
+}
+
 function checkClipboard() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!isPaired || !sessionId) return;
 
   try {
     // Check for image first (takes priority)
@@ -521,7 +806,7 @@ function checkClipboard() {
         const mimeType = 'image/jpeg';
 
         if (buffer.length <= MAX_IMAGE_SIZE_BYTES) {
-          uploadClipboardImage(buffer, mimeType, size);
+          queueScreenshot(buffer, mimeType, size);
         } else {
           console.log(`[Clipboard] Image too large (${(buffer.length / (1024 * 1024)).toFixed(1)}MB), skipped`);
           sendToRenderer('clipboard-error', { message: 'Image too large to send (>10MB)' });
@@ -538,8 +823,8 @@ function checkClipboard() {
 
       const byteLength = Buffer.byteLength(text, 'utf8');
 
-      // If text fits safely in a single WebSocket frame (<= 8KB), send immediately via WebSocket!
-      if (byteLength <= 8192) {
+      // If text fits safely in a single WebSocket frame (<= 8KB) and WS is OPEN, send directly via WS
+      if (byteLength <= 8192 && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
           type: 'clipboard',
           contentType: 'text',
@@ -553,196 +838,12 @@ function checkClipboard() {
 
         console.log(`[Clipboard] Text sent via WS (${text.length} chars, ${byteLength} bytes)`);
       } else {
-        // For large text (> 8KB to ANY size), stream using our resilient 4KB chunking engine!
-        uploadClipboardText(text);
+        // For large text or when WS is temporarily reconnecting: queue in outbox!
+        queueText(text);
       }
     }
   } catch (err) {
     console.error('[Clipboard] Check error:', err.message);
-  }
-}
-
-async function uploadClipboardImage(buffer, mimeType, size) {
-  if (!serverUrl || !sessionId) return;
-
-  const crypto = require('crypto');
-  const imageId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now();
-  const CHUNK_SIZE = 4096; // 4KB chunks ensure 100% transmission across any ISP, CGNAT, or Cloudflare edge
-  const totalChunks = Math.ceil(buffer.length / CHUNK_SIZE);
-
-  console.log(`[Clipboard] Uploading ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB) in ${totalChunks} chunks...`);
-
-  const isHttps = serverUrl.startsWith('https');
-  const httpLib = isHttps ? require('https') : require('http');
-
-  function sendOneChunk(index, chunkBuffer, maxRetries = 6) {
-    return new Promise((resolve, reject) => {
-      let attempt = 0;
-
-      function trySend() {
-        attempt++;
-        const url = new URL('/api/clipboard-image-chunk', serverUrl);
-        const req = httpLib.request(url, {
-          method: 'POST',
-          agent: false, // Clean new socket every time to bypass TLS poisoning/fragmentation
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'Content-Length': chunkBuffer.length,
-            'x-session-id': sessionId,
-            'x-image-id': imageId,
-            'x-chunk-index': String(index),
-            'x-total-chunks': String(totalChunks),
-            'x-mime-type': mimeType
-          }
-        }, (res) => {
-          let data = '';
-          res.on('data', c => data += c);
-          res.on('end', () => {
-            if (res.statusCode === 200) {
-              resolve();
-            } else {
-              if (attempt < maxRetries) {
-                setTimeout(trySend, 150 * attempt);
-              } else {
-                reject(new Error(`Server returned HTTP ${res.statusCode}`));
-              }
-            }
-          });
-        });
-
-        req.on('error', (err) => {
-          if (attempt < maxRetries) {
-            setTimeout(trySend, 150 * attempt);
-          } else {
-            reject(err);
-          }
-        });
-
-        req.setTimeout(15000, () => {
-          req.destroy();
-          if (attempt < maxRetries) {
-            setTimeout(trySend, 150 * attempt);
-          } else {
-            reject(new Error('Chunk upload timed out'));
-          }
-        });
-
-        req.write(chunkBuffer);
-        req.end();
-      }
-
-      trySend();
-    });
-  }
-
-  try {
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, buffer.length);
-      const chunk = buffer.subarray(start, end);
-      await sendOneChunk(i, chunk);
-    }
-
-    sendToRenderer('clipboard-sent', {
-      contentType: 'image',
-      size: buffer.length
-    });
-    console.log(`[Clipboard] Image uploaded successfully: ${size.width}x${size.height} (${(buffer.length / 1024).toFixed(1)}KB)`);
-  } catch (err) {
-    console.error('[Clipboard] Image upload failed:', err.message);
-    sendToRenderer('clipboard-error', { message: `Image send failed: ${err.message}` });
-  }
-}
-
-async function uploadClipboardText(text) {
-  if (!serverUrl || !sessionId) return;
-
-  const crypto = require('crypto');
-  const textId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now();
-  const textBuffer = Buffer.from(text, 'utf8');
-  const CHUNK_SIZE = 4096; // 4KB chunks ensure 100% transmission across any ISP, CGNAT, or Cloudflare edge
-  const totalChunks = Math.ceil(textBuffer.length / CHUNK_SIZE);
-
-  console.log(`[Clipboard] Uploading large text: ${text.length} chars (${(textBuffer.length / 1024).toFixed(1)}KB) in ${totalChunks} chunks...`);
-
-  const isHttps = serverUrl.startsWith('https');
-  const httpLib = isHttps ? require('https') : require('http');
-
-  function sendOneTextChunk(index, chunkBuffer, maxRetries = 6) {
-    return new Promise((resolve, reject) => {
-      let attempt = 0;
-
-      function trySend() {
-        attempt++;
-        const url = new URL('/api/clipboard-text-chunk', serverUrl);
-        const req = httpLib.request(url, {
-          method: 'POST',
-          agent: false, // Fresh socket every time prevents TLS poisoning/fragmentation
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'Content-Length': chunkBuffer.length,
-            'x-session-id': sessionId,
-            'x-text-id': textId,
-            'x-chunk-index': String(index),
-            'x-total-chunks': String(totalChunks)
-          }
-        }, (res) => {
-          let data = '';
-          res.on('data', c => data += c);
-          res.on('end', () => {
-            if (res.statusCode === 200) {
-              resolve();
-            } else {
-              if (attempt < maxRetries) {
-                setTimeout(trySend, 150 * attempt);
-              } else {
-                reject(new Error(`Server returned HTTP ${res.statusCode}`));
-              }
-            }
-          });
-        });
-
-        req.on('error', (err) => {
-          if (attempt < maxRetries) {
-            setTimeout(trySend, 150 * attempt);
-          } else {
-            reject(err);
-          }
-        });
-
-        req.setTimeout(15000, () => {
-          req.destroy();
-          if (attempt < maxRetries) {
-            setTimeout(trySend, 150 * attempt);
-          } else {
-            reject(new Error('Text chunk upload timed out'));
-          }
-        });
-
-        req.write(chunkBuffer);
-        req.end();
-      }
-
-      trySend();
-    });
-  }
-
-  try {
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, textBuffer.length);
-      const chunk = textBuffer.subarray(start, end);
-      await sendOneTextChunk(i, chunk);
-    }
-
-    sendToRenderer('clipboard-sent', {
-      contentType: 'text',
-      preview: text.length > 60 ? text.slice(0, 60) + '…' : text
-    });
-    console.log(`[Clipboard] Large text uploaded successfully: ${text.length} chars (${(textBuffer.length / 1024).toFixed(1)}KB)`);
-  } catch (err) {
-    console.error('[Clipboard] Large text upload failed:', err.message);
-    sendToRenderer('clipboard-error', { message: `Text send failed: ${err.message}` });
   }
 }
 
